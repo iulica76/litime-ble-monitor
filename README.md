@@ -98,6 +98,8 @@ sudo nano /etc/systemd/system/solar-battery-monitor.service
 [Unit]
 Description=LiTime Solar Battery BLE Monitor
 After=network.target bluetooth.target
+StartLimitBurst=5
+StartLimitIntervalSec=120
 
 [Service]
 Type=simple
@@ -106,10 +108,6 @@ WorkingDirectory=/opt/litime-ble-monitor
 ExecStart=/opt/litime-ble-monitor/venv/bin/python main.py
 Restart=always
 RestartSec=10
-StartLimitBurst=5
-StartLimitIntervalSec=120
-StartLimitBurst=5
-StartLimitIntervalSec=120
 
 [Install]
 WantedBy=multi-user.target
@@ -130,6 +128,7 @@ sudo systemctl status solar-battery-monitor
 | `BATTERY_OFFSET_SECONDS` | `15` | Delay between consecutive battery polls (seconds) |
 | `BLE_TIMEOUT_SECONDS` | `10` | BLE connection/response timeout per battery |
 | `MAX_FAILURES_BEFORE_OFFLINE` | `3` | Consecutive failures before marking battery offline |
+| `ble_command_settle_seconds` | `0.5` | Pause after a BLE control command before querying BMS status (in `settings.json`) |
 
 > **Scaling tip:** With N batteries, the total time occupied by offsets is `(N-1) × BATTERY_OFFSET_SECONDS`. Make sure this is less than `POLL_CYCLE_SECONDS`. For example, with 8 batteries and a 15s offset, you need at least `7 × 15 = 105s` cycle. A service startup warning will be logged if the configuration is invalid.
 
@@ -166,6 +165,12 @@ Response parsing offsets were verified against the [HACS LiTime integration](htt
 **Multiple batteries going offline:**
 - Increase `BATTERY_OFFSET_SECONDS` to give each battery more time
 - Check for BLE adapter saturation: `dmesg | grep -i bluetooth`
+
+**Service immediately crashes / restart loop:**
+- Check for duplicate battery IDs in `settings.json`. The service will intentionally abort on startup if two batteries share the same ID to prevent cache corruption.
+
+**Service immediately crashes / restart loop:**
+- Check for duplicate battery IDs in `settings.json`. The service will intentionally abort on startup if two batteries share the same ID to prevent cache corruption.
 
 ## Credits
 
