@@ -106,6 +106,10 @@ WorkingDirectory=/opt/litime-ble-monitor
 ExecStart=/opt/litime-ble-monitor/venv/bin/python main.py
 Restart=always
 RestartSec=10
+StartLimitBurst=5
+StartLimitIntervalSec=120
+StartLimitBurst=5
+StartLimitIntervalSec=120
 
 [Install]
 WantedBy=multi-user.target

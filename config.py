@@ -43,9 +43,10 @@ def validate_config() -> None:
         duplicates = [bid for bid in set(ids) if ids.count(bid) > 1]
         logger.error(
             "CONFIGURATION ERROR: duplicate battery IDs found: %s. "
-            "Each battery must have a unique id. Fix settings.json.",
+            "Each battery must have a unique id. Fix settings.json and restart.",
             duplicates,
         )
+        sys.exit(1)
 
     # Check offset vs cycle timing
     if len(BATTERIES) > 1:
@@ -59,8 +60,9 @@ def validate_config() -> None:
                 _total_offset, POLL_CYCLE_SECONDS, len(BATTERIES), BATTERY_OFFSET_SECONDS,
             )
 
-# Fix #5: configurable BLE settle time after a command
-BLE_COMMAND_SETTLE_SECONDS = 0.5  # pause after command, before querying BMS status
+# Pause after sending a BLE control command, before querying BMS status.
+# Increase if charge/discharge commands fail intermittently on your BMS firmware.
+BLE_COMMAND_SETTLE_SECONDS = settings.get("ble_command_settle_seconds", 0.5)
 BLE_TIMEOUT_SECONDS = 10
 MAX_FAILURES_BEFORE_OFFLINE = 3
 

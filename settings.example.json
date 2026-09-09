@@ -17,5 +17,6 @@
   ],
   "log_file": "/var/log/battery_monitor.log",
   "mqtt_client_id": "litime-battery-monitor",
-  "battery_model": "24V 100Ah LiFePO4"
+  "battery_model": "24V 100Ah LiFePO4",
+  "ble_command_settle_seconds": 0.5
 }
