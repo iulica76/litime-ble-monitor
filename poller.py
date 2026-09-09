@@ -9,6 +9,7 @@ from bleak import BleakClient
 from bleak.exc import BleakError
 
 from config import (
+    BLE_COMMAND_SETTLE_SECONDS,
     BLE_MIN_RESPONSE_LENGTH,
     BLE_TIMEOUT_SECONDS,
     CMD_QUERY_STATUS,
@@ -165,14 +166,18 @@ async def read_battery(mac: str, battery_id: int) -> dict[str, Any] | None:
 
         def notification_handler(characteristic, data: bytearray) -> None:
             nonlocal response_data
-            # Detect start of a valid response (byte[2] == 0x65)
-            if (
-                len(data) > RESPONSE_MARKER_OFFSET
-                and data[RESPONSE_MARKER_OFFSET] == RESPONSE_MARKER_VALUE
-            ):
-                response_buffer.clear()
-                response_buffer.extend(data)
-            elif len(response_buffer) > 0:
+            # Detect start of a valid response (byte[2] == 0x65).
+            # We only check the marker when the buffer is empty to avoid
+            # misidentifying a continuation fragment whose byte[2] happens
+            # to be 0x65 as the start of a new response (edge-case corruption).
+            if len(response_buffer) == 0:
+                if (
+                    len(data) > RESPONSE_MARKER_OFFSET
+                    and data[RESPONSE_MARKER_OFFSET] == RESPONSE_MARKER_VALUE
+                ):
+                    response_buffer.extend(data)
+                # else: unsolicited notification before our query — ignore
+            else:
                 response_buffer.extend(data)
 
             # Check if we have the complete response
@@ -273,13 +278,17 @@ async def send_battery_command(mac: str, battery_id: int, cmd: int) -> dict[str,
 
         def notification_handler(characteristic, data: bytearray) -> None:
             nonlocal response_data
-            if (
-                len(data) > RESPONSE_MARKER_OFFSET
-                and data[RESPONSE_MARKER_OFFSET] == RESPONSE_MARKER_VALUE
-            ):
-                response_buffer.clear()
-                response_buffer.extend(data)
-            elif len(response_buffer) > 0:
+            # Same safe reassembly as read_battery: check marker only on empty buffer
+            # to prevent a continuation fragment with 0x65 at offset 2 from being
+            # mistaken for the start of a new response.
+            if len(response_buffer) == 0:
+                if (
+                    len(data) > RESPONSE_MARKER_OFFSET
+                    and data[RESPONSE_MARKER_OFFSET] == RESPONSE_MARKER_VALUE
+                ):
+                    response_buffer.extend(data)
+                # else: BMS ack for the control command (no marker) — ignore
+            else:
                 response_buffer.extend(data)
 
             if len(response_buffer) >= BLE_MIN_RESPONSE_LENGTH:
@@ -323,7 +332,7 @@ async def send_battery_command(mac: str, battery_id: int, cmd: int) -> dict[str,
                 # Step 2: brief pause so the BMS can process the command.
                 # Any notification the BMS sends in response to the control command
                 # won't have the 0x65 marker, so it will be ignored by the handler.
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(BLE_COMMAND_SETTLE_SECONDS)
 
                 # Step 3: reset response state, then query actual BMS status.
                 # This mirrors what the HACS coordinator does: send command ->

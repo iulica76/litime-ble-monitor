@@ -18,7 +18,7 @@ from config import (
 )
 from mqtt_client import MqttClient
 from poller import read_battery, send_battery_command
-from config import CMD_CHARGE_ON, CMD_CHARGE_OFF, CMD_DISCHARGE_ON, CMD_DISCHARGE_OFF
+from config import CMD_CHARGE_ON, CMD_CHARGE_OFF, CMD_DISCHARGE_ON, CMD_DISCHARGE_OFF, validate_config
 
 
 def setup_logging() -> None:
@@ -211,6 +211,7 @@ async def _delayed_poll(
 async def main() -> None:
     """Main loop: polling every POLL_CYCLE_SECONDS seconds."""
     setup_logging()
+    validate_config()
     logger.info("=" * 60)
     logger.info("Battery Monitor started")
     logger.info("Configured batteries: %d", len(BATTERIES))

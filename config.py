@@ -33,16 +33,34 @@ POLL_CYCLE_SECONDS = 60
 BATTERY_OFFSET_SECONDS = 15
 
 # ─── Runtime Validation ────────────────────────────────────────────────────────
-if len(BATTERIES) > 1:
-    _total_offset = (len(BATTERIES) - 1) * BATTERY_OFFSET_SECONDS
-    if _total_offset >= POLL_CYCLE_SECONDS:
-        logger.warning(
-            "CONFIGURATION WARNING: total BLE offset (%ds) >= poll cycle (%ds). "
-            "With %d batteries and %ds offset, the last battery poll may overlap "
-            "the next cycle. Consider increasing POLL_CYCLE_SECONDS or "
-            "decreasing BATTERY_OFFSET_SECONDS.",
-            _total_offset, POLL_CYCLE_SECONDS, len(BATTERIES), BATTERY_OFFSET_SECONDS,
+def validate_config() -> None:
+    """Validates configuration after logging is set up.
+    Must be called from main() after setup_logging() so warnings reach the log file.
+    """
+    # Check for duplicate battery IDs
+    ids = [b['id'] for b in BATTERIES]
+    if len(ids) != len(set(ids)):
+        duplicates = [bid for bid in set(ids) if ids.count(bid) > 1]
+        logger.error(
+            "CONFIGURATION ERROR: duplicate battery IDs found: %s. "
+            "Each battery must have a unique id. Fix settings.json.",
+            duplicates,
         )
+
+    # Check offset vs cycle timing
+    if len(BATTERIES) > 1:
+        _total_offset = (len(BATTERIES) - 1) * BATTERY_OFFSET_SECONDS
+        if _total_offset >= POLL_CYCLE_SECONDS:
+            logger.warning(
+                "CONFIGURATION WARNING: total BLE offset (%ds) >= poll cycle (%ds). "
+                "With %d batteries and %ds offset, the last battery poll may overlap "
+                "the next cycle. Consider increasing POLL_CYCLE_SECONDS or "
+                "decreasing BATTERY_OFFSET_SECONDS.",
+                _total_offset, POLL_CYCLE_SECONDS, len(BATTERIES), BATTERY_OFFSET_SECONDS,
+            )
+
+# Fix #5: configurable BLE settle time after a command
+BLE_COMMAND_SETTLE_SECONDS = 0.5  # pause after command, before querying BMS status
 BLE_TIMEOUT_SECONDS = 10
 MAX_FAILURES_BEFORE_OFFLINE = 3
 

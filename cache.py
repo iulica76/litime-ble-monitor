@@ -33,10 +33,12 @@ class BatteryCache:
     @property
     def status(self) -> str:
         """Textual state of the battery."""
-        if self.last_seen is None:
-            return "never_seen"
         if self.is_offline:
+            # Show 'offline' whether the battery was manually disabled (force_offline)
+            # or was never seen — is_offline is True in both cases.
             return "offline"
+        if self.last_seen is None:
+            return "never_seen"  # online but no successful read yet
         if self.consecutive_failures > 0:
             return "degraded"  # has old data, but limit not exceeded
         return "online"
