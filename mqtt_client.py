@@ -42,7 +42,7 @@ SENSOR_DEFINITIONS = [
     ("full_charge_capacity","Full Charge Capacity",      "Ah",  None,          "mdi:battery-check"),
     ("state_of_health",     "State of Health",           "%",   None,          "mdi:heart-pulse"),
     ("discharge_cycles",    "Discharge Cycles",          None,  None,          "mdi:recycle"),
-    ("total_discharge_ah",  "Total Discharge",           "Ah",  "energy",      "mdi:battery-minus"),
+    ("total_discharge_ah",  "Total Discharge",           "Ah",  None,      "mdi:battery-minus"),
     ("min_cell_voltage",    "Min Cell Voltage",          "V",   "voltage",     "mdi:battery-low"),
     ("max_cell_voltage",    "Max Cell Voltage",          "V",   "voltage",     "mdi:battery-high"),
     ("delta_cell_voltage",  "Delta Cell Voltage",        "V",   "voltage",     "mdi:delta"),
@@ -166,7 +166,10 @@ class MqttClient:
                 if dev_class:
                     config["device_class"] = dev_class
                 if field not in ["protection_status", "failure_status"]:
-                    config["state_class"] = "measurement"
+                    if field in ["total_discharge_ah", "discharge_cycles"]:
+                        config["state_class"] = "total_increasing"
+                    else:
+                        config["state_class"] = "measurement"
 
                 disc_topic = (
                     f"{MQTT_DISCOVERY_PREFIX}/sensor/{unique_id}/config"
