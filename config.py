@@ -28,8 +28,11 @@ MQTT_CLIENT_ID = settings.get("mqtt_client_id", "litime-battery-monitor")
 BATTERY_MODEL = settings.get("battery_model", "LiFePO4")
 LOG_FILE = settings.get("log_file", "battery_monitor.log")
 
-# ─── Static Settings ───────────────────────────────────────────────────────────
-POLL_CYCLE_SECONDS = 60
+# ─── Static / Dynamic Settings ─────────────────────────────────────────────────
+# Delay between full polling cycles
+CYCLE_DELAY_SECONDS = settings.get("cycle_delay_seconds", 5)
+
+# Delay before moving to next battery IF the current one fails
 BATTERY_OFFSET_SECONDS = 15
 
 # ─── Runtime Validation ────────────────────────────────────────────────────────
@@ -48,22 +51,26 @@ def validate_config() -> None:
         )
         sys.exit(1)
 
-    # Check offset vs cycle timing
-    if len(BATTERIES) > 1:
-        _total_offset = (len(BATTERIES) - 1) * BATTERY_OFFSET_SECONDS
-        if _total_offset >= POLL_CYCLE_SECONDS:
-            logger.warning(
-                "CONFIGURATION WARNING: total BLE offset (%ds) >= poll cycle (%ds). "
-                "With %d batteries and %ds offset, the last battery poll may overlap "
-                "the next cycle. Consider increasing POLL_CYCLE_SECONDS or "
-                "decreasing BATTERY_OFFSET_SECONDS.",
-                _total_offset, POLL_CYCLE_SECONDS, len(BATTERIES), BATTERY_OFFSET_SECONDS,
-            )
+    if MAX_CONCURRENT_BLE_CONNECTIONS < 1:
+        logger.error(
+            "CONFIGURATION ERROR: max_concurrent_ble_connections must be at least 1. "
+            "A value of %d would prevent all BLE connections. Fix settings.json and restart.",
+            MAX_CONCURRENT_BLE_CONNECTIONS
+        )
+        sys.exit(1)
+
+# Maximum concurrent BLE connections. Increase only if you know your Bluetooth adapter
+# can handle multiple connections simultaneously without dropping them.
+MAX_CONCURRENT_BLE_CONNECTIONS = settings.get("max_concurrent_ble_connections", 1)
+
+# Pause after a successful BLE disconnect, before connecting to the next device.
+# Helps the Bluetooth adapter clean up state.
+BLE_ADAPTER_SETTLE_SECONDS = settings.get("ble_adapter_settle_seconds", 1.0)
 
 # Pause after sending a BLE control command, before querying BMS status.
 # Increase if charge/discharge commands fail intermittently on your BMS firmware.
 BLE_COMMAND_SETTLE_SECONDS = settings.get("ble_command_settle_seconds", 0.5)
-BLE_TIMEOUT_SECONDS = 10
+BLE_TIMEOUT_SECONDS = settings.get("ble_timeout_seconds", 10)
 MAX_FAILURES_BEFORE_OFFLINE = 3
 
 MQTT_TOPIC_PREFIX = "solar/battery"

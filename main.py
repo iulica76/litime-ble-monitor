@@ -10,11 +10,12 @@ from cache import CacheManager
 from config import (
     BATTERIES,
     BATTERY_OFFSET_SECONDS,
+    BLE_ADAPTER_SETTLE_SECONDS,
+    CYCLE_DELAY_SECONDS,
     LOG_BACKUP_COUNT,
     LOG_FILE,
     LOG_LEVEL,
     LOG_MAX_BYTES,
-    POLL_CYCLE_SECONDS,
 )
 from mqtt_client import MqttClient
 from poller import read_battery, send_battery_command
@@ -126,7 +127,7 @@ async def poll_one_battery(
     battery: dict,
     cache: CacheManager,
     mqtt: MqttClient,
-) -> None:
+) -> bool:
     """Polling for a single battery: connect -> read -> cache -> MQTT -> disconnect."""
     bid = battery["id"]
     mac = battery["mac"]
@@ -136,11 +137,11 @@ async def poll_one_battery(
         logger.debug("Battery %d: Connection disabled, skipping poll", bid)
         # Ensure connection switch state is published even when skipping
         mqtt._client.publish(f"solar/battery/{bid}/connection", "OFF", retain=True)
-        return
+        return True
 
     if not mac:
         logger.warning("Battery %d: MAC address not configured - skipping", bid)
-        return
+        return True
 
     data = await read_battery(mac, bid)
 
@@ -155,35 +156,40 @@ async def poll_one_battery(
         cache.get(bid).force_offline()
         mqtt._client.publish(f"solar/battery/{bid}/connection", "OFF", retain=True)
         mqtt.publish_battery(bid, None)
-        return
+        return True
 
     bat_cache = cache.get(bid)
 
     if data is not None:
         data["connection_enabled"] = CONNECTION_STATE.get(bid, True)
         bat_cache.record_success(data)
-
+        success = True
     else:
         bat_cache.record_failure()
+        success = False
 
     # Publish to MQTT - real data or None (-> offline)
     mqtt.publish_battery(bid, bat_cache.get_publish_data())
+    return success
 
 
 async def poll_cycle(cache: CacheManager, mqtt: MqttClient) -> None:
     """
-    One full cycle: sequential polling for all batteries.
-    We have a BATTERY_OFFSET_SECONDS offset between consecutive batteries.
+    One full cycle: sequential dynamic polling for all batteries.
+    If a battery poll fails, we wait BATTERY_OFFSET_SECONDS before continuing.
     """
     logger.info("--- Start polling cycle --- %s", cache.summary())
 
-    tasks = []
-    for i, battery in enumerate(BATTERIES):
-        # Create a task with delay for each battery
-        delay = i * BATTERY_OFFSET_SECONDS
-        tasks.append(_delayed_poll(battery, cache, mqtt, delay))
-
-    await asyncio.gather(*tasks)
+    for battery in BATTERIES:
+        success = await poll_one_battery(battery, cache, mqtt)
+        
+        if not success:
+            logger.debug("Battery %d failed, waiting %ds", battery['id'], BATTERY_OFFSET_SECONDS)
+            await asyncio.sleep(BATTERY_OFFSET_SECONDS)
+        else:
+            # Short delay for BLE controller stability before connecting to the next device
+            if BLE_ADAPTER_SETTLE_SECONDS > 0:
+                await asyncio.sleep(BLE_ADAPTER_SETTLE_SECONDS)
 
     # Publish global system state
     offline = cache.offline_count()
@@ -196,26 +202,14 @@ async def poll_cycle(cache: CacheManager, mqtt: MqttClient) -> None:
         logger.info("SYSTEM: all batteries online")
 
 
-async def _delayed_poll(
-    battery: dict,
-    cache: CacheManager,
-    mqtt: MqttClient,
-    delay: float,
-) -> None:
-    """Waits for delay seconds then polls the battery."""
-    if delay > 0:
-        await asyncio.sleep(delay)
-    await poll_one_battery(battery, cache, mqtt)
-
-
 async def main() -> None:
-    """Main loop: polling every POLL_CYCLE_SECONDS seconds."""
+    """Main loop."""
     setup_logging()
     validate_config()
     logger.info("=" * 60)
     logger.info("Battery Monitor started")
     logger.info("Configured batteries: %d", len(BATTERIES))
-    logger.info("Polling cycle: %ds, offset: %ds", POLL_CYCLE_SECONDS, BATTERY_OFFSET_SECONDS)
+    logger.info("Inter-cycle delay: %ds, error backoff: %ds", CYCLE_DELAY_SECONDS, BATTERY_OFFSET_SECONDS)
     logger.info("=" * 60)
 
     # Verify configuration
@@ -268,15 +262,16 @@ async def main() -> None:
             except Exception as err:
                 logger.error("Unexpected error in cycle: %s", err, exc_info=True)
 
-            # Wait for the remainder of the cycle (POLL_CYCLE_SECONDS total)
+            # Wait before starting the next cycle
             elapsed = asyncio.get_running_loop().time() - cycle_start
-            wait = max(0, POLL_CYCLE_SECONDS - elapsed)
-            logger.debug("Cycle took %.1fs, next in %.1fs", elapsed, wait)
+            wait = CYCLE_DELAY_SECONDS
+            logger.debug("Cycle took %.1fs, waiting %.1fs before next cycle", elapsed, wait)
 
-            try:
-                await asyncio.wait_for(stop_event.wait(), timeout=wait)
-            except TimeoutError:
-                pass  # normal timeout, continue to next cycle
+            if wait > 0:
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=wait)
+                except TimeoutError:
+                    pass  # normal timeout, continue to next cycle
 
     finally:
         logger.info("Battery Monitor stopped")

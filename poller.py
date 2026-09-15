@@ -13,9 +13,21 @@ from config import (
     BLE_MIN_RESPONSE_LENGTH,
     BLE_TIMEOUT_SECONDS,
     CMD_QUERY_STATUS,
+    MAX_CONCURRENT_BLE_CONNECTIONS,
 )
 
 logger = logging.getLogger(__name__)
+
+# Global semaphore: prevents overloading the Bluetooth adapter with too many
+# concurrent connections across all batteries. Usually 1 or 2 is safe.
+_ble_semaphore: asyncio.Semaphore | None = None
+
+def _get_ble_semaphore() -> asyncio.Semaphore:
+    """Return (creating if needed) the global asyncio Semaphore."""
+    global _ble_semaphore
+    if _ble_semaphore is None:
+        _ble_semaphore = asyncio.Semaphore(MAX_CONCURRENT_BLE_CONNECTIONS)
+    return _ble_semaphore
 
 # Per-battery lock: prevents concurrent BLE connections to the same device.
 # A command (send_battery_command) and a poll (read_battery) must never run
@@ -157,101 +169,103 @@ async def read_battery(mac: str, battery_id: int) -> dict[str, Any] | None:
     """
     Connects to the battery, reads BMS data, disconnects.
     Returns dict with data or None on failure.
-    Uses a per-battery lock to prevent concurrent BLE connections.
+    Uses a per-battery lock to prevent concurrent BLE connections,
+    and a global semaphore to limit overall adapter concurrency.
     """
     async with _get_lock(battery_id):
-        response_buffer = bytearray()
-        response_event  = asyncio.Event()
-        response_data: bytes | None = None
-
-        def notification_handler(characteristic, data: bytearray) -> None:
-            nonlocal response_data
-            # Detect start of a valid response (byte[2] == 0x65).
-            # We only check the marker when the buffer is empty to avoid
-            # misidentifying a continuation fragment whose byte[2] happens
-            # to be 0x65 as the start of a new response (edge-case corruption).
-            if len(response_buffer) == 0:
-                if (
-                    len(data) > RESPONSE_MARKER_OFFSET
-                    and data[RESPONSE_MARKER_OFFSET] == RESPONSE_MARKER_VALUE
-                ):
+        async with _get_ble_semaphore():
+            response_buffer = bytearray()
+            response_event  = asyncio.Event()
+            response_data: bytes | None = None
+    
+            def notification_handler(characteristic, data: bytearray) -> None:
+                nonlocal response_data
+                # Detect start of a valid response (byte[2] == 0x65).
+                # We only check the marker when the buffer is empty to avoid
+                # misidentifying a continuation fragment whose byte[2] happens
+                # to be 0x65 as the start of a new response (edge-case corruption).
+                if len(response_buffer) == 0:
+                    if (
+                        len(data) > RESPONSE_MARKER_OFFSET
+                        and data[RESPONSE_MARKER_OFFSET] == RESPONSE_MARKER_VALUE
+                    ):
+                        response_buffer.extend(data)
+                    # else: unsolicited notification before our query — ignore
+                else:
                     response_buffer.extend(data)
-                # else: unsolicited notification before our query — ignore
-            else:
-                response_buffer.extend(data)
-
-            # Check if we have the complete response
-            if len(response_buffer) >= BLE_MIN_RESPONSE_LENGTH:
-                response_data = bytes(response_buffer)
-                response_buffer.clear()
-                response_event.set()
-
-        logger.debug("Battery %d (%s): connecting...", battery_id, mac)
-
-        try:
-            async with BleakClient(mac, timeout=BLE_TIMEOUT_SECONDS) as client:
-                if not client.is_connected:
-                    logger.warning("Battery %d (%s): connection failed", battery_id, mac)
-                    return None
-
-                logger.debug("Battery %d (%s): connected, sending query...", battery_id, mac)
-
-                # Find notify characteristic (FFE1)
-                notify_char = None
-                write_char  = None
-                for service in client.services:
-                    if "ffe0" in service.uuid.lower():
-                        for char in service.characteristics:
-                            if "ffe1" in char.uuid.lower() and "notify" in char.properties:
-                                notify_char = char
-                            if "ffe2" in char.uuid.lower() and (
-                                "write" in char.properties
-                                or "write-without-response" in char.properties
-                            ):
-                                write_char = char
-
-                if not notify_char or not write_char:
-                    logger.error(
-                        "Battery %d (%s): characteristics FFE1/FFE2 not found", battery_id, mac
-                    )
-                    return None
-
-                # Subscribe to notifications
-                await client.start_notify(notify_char, notification_handler)
-
-                # Send query status command
-                use_response = "write-without-response" not in write_char.properties
-                await client.write_gatt_char(write_char, CMD_QUERY_STATUS, response=use_response)
-
-                # Wait for response (timeout 10s)
-                try:
-                    await asyncio.wait_for(response_event.wait(), timeout=BLE_TIMEOUT_SECONDS)
-                except TimeoutError:
-                    logger.warning(
-                        "Battery %d (%s): timeout waiting for response", battery_id, mac
-                    )
-                    return None
-
-                if response_data is None:
-                    logger.warning("Battery %d (%s): no data in response", battery_id, mac)
-                    return None
-
-                # Parse response
-                try:
-                    result = _parse_response(response_data)
-                    logger.debug(
-                        "Battery %d (%s): clean disconnect after successful read",
-                        battery_id, mac
-                    )
-                    return result
-                except (ValueError, struct.error) as err:
-                    logger.error("Battery %d (%s): parsing error - %s", battery_id, mac, err)
-                    return None
-
-        except (BleakError, TimeoutError, OSError) as err:
-            logger.warning("Battery %d (%s): BLE error - %s", battery_id, mac, err)
-            return None
-
+    
+                # Check if we have the complete response
+                if len(response_buffer) >= BLE_MIN_RESPONSE_LENGTH:
+                    response_data = bytes(response_buffer)
+                    response_buffer.clear()
+                    response_event.set()
+    
+            logger.debug("Battery %d (%s): connecting...", battery_id, mac)
+    
+            try:
+                async with BleakClient(mac, timeout=BLE_TIMEOUT_SECONDS) as client:
+                    if not client.is_connected:
+                        logger.warning("Battery %d (%s): connection failed", battery_id, mac)
+                        return None
+    
+                    logger.debug("Battery %d (%s): connected, sending query...", battery_id, mac)
+    
+                    # Find notify characteristic (FFE1)
+                    notify_char = None
+                    write_char  = None
+                    for service in client.services:
+                        if "ffe0" in service.uuid.lower():
+                            for char in service.characteristics:
+                                if "ffe1" in char.uuid.lower() and "notify" in char.properties:
+                                    notify_char = char
+                                if "ffe2" in char.uuid.lower() and (
+                                    "write" in char.properties
+                                    or "write-without-response" in char.properties
+                                ):
+                                    write_char = char
+    
+                    if not notify_char or not write_char:
+                        logger.error(
+                            "Battery %d (%s): characteristics FFE1/FFE2 not found", battery_id, mac
+                        )
+                        return None
+    
+                    # Subscribe to notifications
+                    await client.start_notify(notify_char, notification_handler)
+    
+                    # Send query status command
+                    use_response = "write-without-response" not in write_char.properties
+                    await client.write_gatt_char(write_char, CMD_QUERY_STATUS, response=use_response)
+    
+                    # Wait for response (timeout 10s)
+                    try:
+                        await asyncio.wait_for(response_event.wait(), timeout=BLE_TIMEOUT_SECONDS)
+                    except TimeoutError:
+                        logger.warning(
+                            "Battery %d (%s): timeout waiting for response", battery_id, mac
+                        )
+                        return None
+    
+                    if response_data is None:
+                        logger.warning("Battery %d (%s): no data in response", battery_id, mac)
+                        return None
+    
+                    # Parse response
+                    try:
+                        result = _parse_response(response_data)
+                        logger.debug(
+                            "Battery %d (%s): clean disconnect after successful read",
+                            battery_id, mac
+                        )
+                        return result
+                    except (ValueError, struct.error) as err:
+                        logger.error("Battery %d (%s): parsing error - %s", battery_id, mac, err)
+                        return None
+    
+            except (BleakError, TimeoutError, OSError) as err:
+                logger.warning("Battery %d (%s): BLE error - %s", battery_id, mac, err)
+                return None
+    
 
 def _build_command(cmd: int) -> bytes:
     checksum = 0x04 + cmd
@@ -272,103 +286,104 @@ async def send_battery_command(mac: str, battery_id: int, cmd: int) -> dict[str,
     logger.info("Battery %d (%s): sending command 0x%02X...", battery_id, mac, cmd)
 
     async with _get_lock(battery_id):
-        response_buffer = bytearray()
-        response_event  = asyncio.Event()
-        response_data: bytes | None = None
+        async with _get_ble_semaphore():
+            response_buffer = bytearray()
+            response_event  = asyncio.Event()
+            response_data: bytes | None = None
 
-        def notification_handler(characteristic, data: bytearray) -> None:
-            nonlocal response_data
-            # Same safe reassembly as read_battery: check marker only on empty buffer
-            # to prevent a continuation fragment with 0x65 at offset 2 from being
-            # mistaken for the start of a new response.
-            if len(response_buffer) == 0:
-                if (
-                    len(data) > RESPONSE_MARKER_OFFSET
-                    and data[RESPONSE_MARKER_OFFSET] == RESPONSE_MARKER_VALUE
-                ):
+            def notification_handler(characteristic, data: bytearray) -> None:
+                nonlocal response_data
+                # Same safe reassembly as read_battery: check marker only on empty buffer
+                # to prevent a continuation fragment with 0x65 at offset 2 from being
+                # mistaken for the start of a new response.
+                if len(response_buffer) == 0:
+                    if (
+                        len(data) > RESPONSE_MARKER_OFFSET
+                        and data[RESPONSE_MARKER_OFFSET] == RESPONSE_MARKER_VALUE
+                    ):
+                        response_buffer.extend(data)
+                    # else: BMS ack for the control command (no marker) — ignore
+                else:
                     response_buffer.extend(data)
-                # else: BMS ack for the control command (no marker) — ignore
-            else:
-                response_buffer.extend(data)
-
-            if len(response_buffer) >= BLE_MIN_RESPONSE_LENGTH:
-                response_data = bytes(response_buffer)
-                response_buffer.clear()
-                response_event.set()
-
-        try:
-            async with BleakClient(mac, timeout=BLE_TIMEOUT_SECONDS) as client:
-                if not client.is_connected:
-                    logger.warning("Battery %d: connect failed for command", battery_id)
-                    return None
-
-                notify_char = None
-                write_char  = None
-                for service in client.services:
-                    if "ffe0" in service.uuid.lower():
-                        for char in service.characteristics:
-                            if "ffe1" in char.uuid.lower() and "notify" in char.properties:
-                                notify_char = char
-                            if "ffe2" in char.uuid.lower() and (
-                                "write" in char.properties
-                                or "write-without-response" in char.properties
-                            ):
-                                write_char = char
-
-                if not notify_char or not write_char:
-                    logger.error("Battery %d: characteristics not found for command", battery_id)
-                    return None
-
-                use_response = "write-without-response" not in write_char.properties
-
-                # Subscribe to notifications before sending anything
-                await client.start_notify(notify_char, notification_handler)
-
-                # Step 1: send the control command (charge on/off, discharge on/off)
-                frame = _build_command(cmd)
-                await client.write_gatt_char(write_char, frame, response=use_response)
-                logger.debug("Battery %d: command 0x%02X sent", battery_id, cmd)
-
-                # Step 2: brief pause so the BMS can process the command.
-                # Any notification the BMS sends in response to the control command
-                # won't have the 0x65 marker, so it will be ignored by the handler.
-                await asyncio.sleep(BLE_COMMAND_SETTLE_SECONDS)
-
-                # Step 3: reset response state, then query actual BMS status.
-                # This mirrors what the HACS coordinator does: send command ->
-                # clear state -> send query -> wait for notification.
-                response_buffer.clear()
-                response_event.clear()
-                response_data = None
-
-                await client.write_gatt_char(write_char, CMD_QUERY_STATUS, response=use_response)
-
-                # Step 4: wait for the status notification
-                try:
-                    await asyncio.wait_for(response_event.wait(), timeout=BLE_TIMEOUT_SECONDS)
-                except TimeoutError:
-                    logger.warning(
-                        "Battery %d: timeout waiting for status after command", battery_id
-                    )
-                    return None
-
-                if response_data is None:
-                    logger.warning("Battery %d: no status data after command", battery_id)
-                    return None
-
-                try:
-                    result = _parse_response(response_data)
-                    logger.info(
-                        "Battery %d: BMS confirmed -- charge_enabled=%s discharge_enabled=%s",
-                        battery_id,
-                        result.get("charge_enabled"),
-                        result.get("discharge_enabled"),
-                    )
-                    return result
-                except (ValueError, struct.error) as err:
-                    logger.error("Battery %d: parse error after command: %s", battery_id, err)
-                    return None
-
-        except (BleakError, TimeoutError, OSError) as err:
-            logger.error("Battery %d: BLE error during command: %s", battery_id, err)
+    
+                if len(response_buffer) >= BLE_MIN_RESPONSE_LENGTH:
+                    response_data = bytes(response_buffer)
+                    response_buffer.clear()
+                    response_event.set()
+    
+            try:
+                async with BleakClient(mac, timeout=BLE_TIMEOUT_SECONDS) as client:
+                    if not client.is_connected:
+                        logger.warning("Battery %d: connect failed for command", battery_id)
+                        return None
+    
+                    notify_char = None
+                    write_char  = None
+                    for service in client.services:
+                        if "ffe0" in service.uuid.lower():
+                            for char in service.characteristics:
+                                if "ffe1" in char.uuid.lower() and "notify" in char.properties:
+                                    notify_char = char
+                                if "ffe2" in char.uuid.lower() and (
+                                    "write" in char.properties
+                                    or "write-without-response" in char.properties
+                                ):
+                                    write_char = char
+    
+                    if not notify_char or not write_char:
+                        logger.error("Battery %d: characteristics not found for command", battery_id)
+                        return None
+    
+                    use_response = "write-without-response" not in write_char.properties
+    
+                    # Subscribe to notifications before sending anything
+                    await client.start_notify(notify_char, notification_handler)
+    
+                    # Step 1: send the control command (charge on/off, discharge on/off)
+                    frame = _build_command(cmd)
+                    await client.write_gatt_char(write_char, frame, response=use_response)
+                    logger.debug("Battery %d: command 0x%02X sent", battery_id, cmd)
+    
+                    # Step 2: brief pause so the BMS can process the command.
+                    # Any notification the BMS sends in response to the control command
+                    # won't have the 0x65 marker, so it will be ignored by the handler.
+                    await asyncio.sleep(BLE_COMMAND_SETTLE_SECONDS)
+    
+                    # Step 3: reset response state, then query actual BMS status.
+                    # This mirrors what the HACS coordinator does: send command ->
+                    # clear state -> send query -> wait for notification.
+                    response_buffer.clear()
+                    response_event.clear()
+                    response_data = None
+    
+                    await client.write_gatt_char(write_char, CMD_QUERY_STATUS, response=use_response)
+    
+                    # Step 4: wait for the status notification
+                    try:
+                        await asyncio.wait_for(response_event.wait(), timeout=BLE_TIMEOUT_SECONDS)
+                    except TimeoutError:
+                        logger.warning(
+                            "Battery %d: timeout waiting for status after command", battery_id
+                        )
+                        return None
+    
+                    if response_data is None:
+                        logger.warning("Battery %d: no status data after command", battery_id)
+                        return None
+    
+                    try:
+                        result = _parse_response(response_data)
+                        logger.info(
+                            "Battery %d: BMS confirmed -- charge_enabled=%s discharge_enabled=%s",
+                            battery_id,
+                            result.get("charge_enabled"),
+                            result.get("discharge_enabled"),
+                        )
+                        return result
+                    except (ValueError, struct.error) as err:
+                        logger.error("Battery %d: parse error after command: %s", battery_id, err)
+                        return None
+    
+            except (BleakError, TimeoutError, OSError) as err:
+                logger.error("Battery %d: BLE error during command: %s", battery_id, err)
             return None

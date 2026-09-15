@@ -7,15 +7,15 @@ A robust Python service that monitors and controls multiple **LiTime LiFePO4 Blu
 LiTime batteries expose a BLE (Bluetooth Low Energy) interface for monitoring. The official LiTime app connects to one battery at a time. The [HACS LiTime integration](https://github.com/ItzBenoitXD/litime) works great for 1–2 batteries, but hits a hard wall when you have **more than 2–3 batteries on the same Bluetooth adapter**: the OS BLE stack struggles with concurrent connections, leading to dropped connections and missing data.
 
 This service solves the problem by:
-- Connecting to each battery **sequentially**, one at a time, with configurable time offsets
-- Using **per-battery asyncio locks** to prevent any concurrent BLE access
-- Running as a **systemd service** in the background, polling every 60 seconds
+- Connecting to each battery **sequentially**, one at a time, to guarantee maximum BLE stability
+- Using a **global asyncio semaphore** to prevent any concurrent BLE connections on the same adapter
+- Running as a **systemd service** in the background, polling continuously with a configurable small delay between cycles
 - Publishing everything to Home Assistant via **MQTT with Auto-Discovery** — no manual entity configuration needed
 
 ## Features
 
 - 🔋 **Supports any number of batteries** — configured dynamically via `settings.json`
-- 🔵 **Sequential BLE polling** with configurable offsets to avoid adapter saturation
+- 🔵 **Sequential dynamic BLE polling** with configurable backoff on errors
 - 🏠 **Home Assistant Auto-Discovery** — all sensors, binary sensors and switches appear automatically
 - ⚡ **Charge / Discharge control** — toggle BMS charge and discharge directly from HA
 - 🔌 **Connection switch** — disable/enable individual battery monitoring from HA without stopping the service
@@ -69,13 +69,18 @@ Edit `settings.json` with your values:
   "mqtt_port": 1883,
   "mqtt_username": "your_mqtt_user",
   "mqtt_password": "your_mqtt_password",
+  "mqtt_client_id": "litime-battery-monitor",
+  "battery_model": "24V 100Ah LiFePO4",
   "batteries": [
     {"id": 1, "name": "Solar_Batt_1", "mac": "XX:XX:XX:XX:XX:XX"},
-    {"id": 2, "name": "Solar_Batt_2", "mac": "XX:XX:XX:XX:XX:XX"},
-    {"id": 3, "name": "Solar_Batt_3", "mac": "XX:XX:XX:XX:XX:XX"},
-    {"id": 4, "name": "Solar_Batt_4", "mac": "XX:XX:XX:XX:XX:XX"}
+    {"id": 2, "name": "Solar_Batt_2", "mac": "XX:XX:XX:XX:XX:XX"}
   ],
-  "log_file": "/var/log/battery_monitor.log"
+  "log_file": "/var/log/battery_monitor.log",
+  "cycle_delay_seconds": 5,
+  "ble_timeout_seconds": 10,
+  "ble_command_settle_seconds": 0.5,
+  "ble_adapter_settle_seconds": 1.0,
+  "max_concurrent_ble_connections": 1
 }
 ```
 
@@ -124,13 +129,15 @@ sudo systemctl status solar-battery-monitor
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `POLL_CYCLE_SECONDS` | `60` | How often to poll all batteries (seconds) |
-| `BATTERY_OFFSET_SECONDS` | `15` | Delay between consecutive battery polls (seconds) |
-| `BLE_TIMEOUT_SECONDS` | `10` | BLE connection/response timeout per battery |
+| `cycle_delay_seconds` | `5` | Delay between consecutive full polling cycles (in `settings.json`) |
+| `BATTERY_OFFSET_SECONDS` | `15` | Delay/backoff to wait after a FAILED battery poll |
+| `ble_timeout_seconds` | `10` | BLE connection/response timeout per battery (in `settings.json`) |
 | `MAX_FAILURES_BEFORE_OFFLINE` | `3` | Consecutive failures before marking battery offline |
 | `ble_command_settle_seconds` | `0.5` | Pause after a BLE control command before querying BMS status (in `settings.json`) |
+| `ble_adapter_settle_seconds` | `1.0` | Pause after a successful BLE disconnect, before connecting to the next device (in `settings.json`) |
+| `max_concurrent_ble_connections` | `1` | Max simultaneous BLE connections. Keep at 1 for adapter stability (in `settings.json`) |
 
-> **Scaling tip:** With N batteries, the total time occupied by offsets is `(N-1) × BATTERY_OFFSET_SECONDS`. Make sure this is less than `POLL_CYCLE_SECONDS`. For example, with 8 batteries and a 15s offset, you need at least `7 × 15 = 105s` cycle. A service startup warning will be logged if the configuration is invalid.
+> **Note on polling time:** The monitor polls batteries sequentially, one by one. In normal conditions, a full cycle takes about 1-2 seconds per battery. If batteries are offline, the total cycle time will automatically extend to accommodate timeouts and backoffs.
 
 ## Architecture
 
@@ -155,7 +162,7 @@ Response parsing offsets were verified against the [HACS LiTime integration](htt
 **Battery not connecting:**
 - Ensure no other device (phone, another process) is currently connected to the battery — BLE allows only one central connection at a time
 - Check that the Bluetooth adapter is up: `hciconfig`
-- Try increasing `BLE_TIMEOUT_SECONDS` in `config.py` for slower adapters
+- Try increasing `ble_timeout_seconds` in `settings.json` for slower adapters
 
 **Sensors not appearing in Home Assistant:**
 - Check that MQTT integration is enabled and connected in HA
@@ -163,11 +170,8 @@ Response parsing offsets were verified against the [HACS LiTime integration](htt
 - Check logs: `journalctl -u solar-battery-monitor -f`
 
 **Multiple batteries going offline:**
-- Increase `BATTERY_OFFSET_SECONDS` to give each battery more time
+- Increase `ble_adapter_settle_seconds` in `settings.json` to give the Bluetooth adapter more time to recover between device connections
 - Check for BLE adapter saturation: `dmesg | grep -i bluetooth`
-
-**Service immediately crashes / restart loop:**
-- Check for duplicate battery IDs in `settings.json`. The service will intentionally abort on startup if two batteries share the same ID to prevent cache corruption.
 
 **Service immediately crashes / restart loop:**
 - Check for duplicate battery IDs in `settings.json`. The service will intentionally abort on startup if two batteries share the same ID to prevent cache corruption.
