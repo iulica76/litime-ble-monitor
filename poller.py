@@ -240,7 +240,7 @@ async def read_battery(mac: str, battery_id: int) -> dict[str, Any] | None:
                     # Wait for response (timeout 10s)
                     try:
                         await asyncio.wait_for(response_event.wait(), timeout=BLE_TIMEOUT_SECONDS)
-                    except TimeoutError:
+                    except (asyncio.TimeoutError, TimeoutError):
                         logger.warning(
                             "Battery %d (%s): timeout waiting for response", battery_id, mac
                         )
@@ -262,7 +262,7 @@ async def read_battery(mac: str, battery_id: int) -> dict[str, Any] | None:
                         logger.error("Battery %d (%s): parsing error - %s", battery_id, mac, err)
                         return None
     
-            except (BleakError, TimeoutError, OSError) as err:
+            except (BleakError, asyncio.TimeoutError, TimeoutError, OSError) as err:
                 logger.warning("Battery %d (%s): BLE error - %s", battery_id, mac, err)
                 return None
     
@@ -361,7 +361,7 @@ async def send_battery_command(mac: str, battery_id: int, cmd: int) -> dict[str,
                     # Step 4: wait for the status notification
                     try:
                         await asyncio.wait_for(response_event.wait(), timeout=BLE_TIMEOUT_SECONDS)
-                    except TimeoutError:
+                    except (asyncio.TimeoutError, TimeoutError):
                         logger.warning(
                             "Battery %d: timeout waiting for status after command", battery_id
                         )
@@ -384,6 +384,6 @@ async def send_battery_command(mac: str, battery_id: int, cmd: int) -> dict[str,
                         logger.error("Battery %d: parse error after command: %s", battery_id, err)
                         return None
     
-            except (BleakError, TimeoutError, OSError) as err:
+            except (BleakError, asyncio.TimeoutError, TimeoutError, OSError) as err:
                 logger.error("Battery %d: BLE error during command: %s", battery_id, err)
             return None

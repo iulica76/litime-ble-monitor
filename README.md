@@ -4,7 +4,7 @@ A robust Python service that monitors and controls multiple **LiTime LiFePO4 Blu
 
 ## The Problem This Solves
 
-LiTime batteries expose a BLE (Bluetooth Low Energy) interface for monitoring. The official LiTime app connects to one battery at a time. The [HACS LiTime integration](https://github.com/ItzBenoitXD/litime) works great for 1–2 batteries, but hits a hard wall when you have **more than 2–3 batteries on the same Bluetooth adapter**: the OS BLE stack struggles with concurrent connections, leading to dropped connections and missing data.
+LiTime batteries expose a BLE (Bluetooth Low Energy) interface for monitoring. The official LiTime app connects to one battery at a time. The [HACS LiTime integration](https://github.com/rubenmuehlhans/litime-ble-hacs) works great for 1–2 batteries, but hits a hard wall when you have **more than 2–3 batteries on the same Bluetooth adapter**: the OS BLE stack struggles with concurrent connections, leading to dropped connections and missing data.
 
 This service solves the problem by:
 - Connecting to each battery **sequentially**, one at a time, to guarantee maximum BLE stability
@@ -31,10 +31,11 @@ This service solves the problem by:
 
 ## Requirements
 
-- Linux with BlueZ (tested on Ubuntu 24.04)
+- Linux with BlueZ (tested on Ubuntu 24.04 and 22.04)
 - Python 3.10+
 - Bluetooth adapter accessible to the service user
 - MQTT broker (e.g. Mosquitto) reachable from the host
+- paho-mqtt 1.x or 2.x
 - Home Assistant with MQTT integration enabled
 
 ## Installation
@@ -76,8 +77,13 @@ Edit `settings.json` with your values:
     {"id": 2, "name": "Solar_Batt_2", "mac": "XX:XX:XX:XX:XX:XX"}
   ],
   "log_file": "/var/log/battery_monitor.log",
+  "log_max_bytes": 5242880,
+  "log_backup_count": 3,
+  "log_level": "INFO",
   "cycle_delay_seconds": 5,
+  "battery_offset_seconds": 15,
   "ble_timeout_seconds": 10,
+  "max_failures_before_offline": 3,
   "ble_command_settle_seconds": 0.5,
   "ble_adapter_settle_seconds": 1.0,
   "max_concurrent_ble_connections": 1
@@ -130,12 +136,16 @@ sudo systemctl status solar-battery-monitor
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `cycle_delay_seconds` | `5` | Delay between consecutive full polling cycles (in `settings.json`) |
-| `BATTERY_OFFSET_SECONDS` | `15` | Delay/backoff to wait after a FAILED battery poll |
+| `battery_offset_seconds` | `15` | Delay/backoff to wait after a FAILED battery poll (in `settings.json`) |
 | `ble_timeout_seconds` | `10` | BLE connection/response timeout per battery (in `settings.json`) |
-| `MAX_FAILURES_BEFORE_OFFLINE` | `3` | Consecutive failures before marking battery offline |
+| `max_failures_before_offline` | `3` | Consecutive failures before marking battery offline (in `settings.json`) |
 | `ble_command_settle_seconds` | `0.5` | Pause after a BLE control command before querying BMS status (in `settings.json`) |
 | `ble_adapter_settle_seconds` | `1.0` | Pause after a successful BLE disconnect, before connecting to the next device (in `settings.json`) |
 | `max_concurrent_ble_connections` | `1` | Max simultaneous BLE connections. Keep at 1 for adapter stability (in `settings.json`) |
+| `log_file` | `battery_monitor.log` | Path to rotating log file (in `settings.json`) |
+| `log_max_bytes` | `5242880` | Max log size in bytes before rotation, 5 MB default (in `settings.json`) |
+| `log_backup_count` | `3` | Number of rotated log backups to retain (in `settings.json`) |
+| `log_level` | `INFO` | Logging level: `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` (in `settings.json`) |
 
 > **Note on polling time:** The monitor polls batteries sequentially, one by one. In normal conditions, a full cycle takes about 1-2 seconds per battery. If batteries are offline, the total cycle time will automatically extend to accommodate timeouts and backoffs.
 
@@ -155,7 +165,7 @@ The service communicates with the LiTime BMS over the `FFE0` GATT service:
 - **Write:** characteristic `FFE2` — sends query/command frames
 - **Notify:** characteristic `FFE1` — receives BMS status responses (104+ bytes)
 
-Response parsing offsets were verified against the [HACS LiTime integration](https://github.com/ItzBenoitXD/litime) source code.
+Response parsing offsets and BMS protocol definitions were verified against the [HACS LiTime integration](https://github.com/rubenmuehlhans/litime-ble-hacs) by Ruben Mühlhans.
 
 ## Troubleshooting
 
@@ -179,6 +189,9 @@ Response parsing offsets were verified against the [HACS LiTime integration](htt
 ## Credits
 
 This project was developed by **Iulian** to solve a real-world problem with multiple LiTime batteries and Home Assistant.
+
+Special thanks to:
+- 🔋 **Ruben Mühlhans** — author of [litime-ble-hacs](https://github.com/rubenmuehlhans/litime-ble-hacs) (MIT License), whose reverse-engineered BMS packet offsets and GATT definitions provided the protocol foundation for this service.
 
 The implementation was built in collaboration with AI assistants:
 

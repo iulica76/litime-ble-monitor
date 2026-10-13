@@ -27,13 +27,31 @@ MQTT_PASSWORD = settings.get("mqtt_password", "")
 MQTT_CLIENT_ID = settings.get("mqtt_client_id", "litime-battery-monitor")
 BATTERY_MODEL = settings.get("battery_model", "LiFePO4")
 LOG_FILE = settings.get("log_file", "battery_monitor.log")
+LOG_LEVEL = str(settings.get("log_level", "INFO")).strip().upper()
+LOG_MAX_BYTES = settings.get("log_max_bytes", 5 * 1024 * 1024)  # Default: 5 MB
+LOG_BACKUP_COUNT = settings.get("log_backup_count", 3)
 
-# ─── Static / Dynamic Settings ─────────────────────────────────────────────────
 # Delay between full polling cycles
 CYCLE_DELAY_SECONDS = settings.get("cycle_delay_seconds", 5)
 
 # Delay before moving to next battery IF the current one fails
-BATTERY_OFFSET_SECONDS = 15
+BATTERY_OFFSET_SECONDS = settings.get("battery_offset_seconds", 15)
+
+# Maximum consecutive failures before marking battery offline
+MAX_FAILURES_BEFORE_OFFLINE = settings.get("max_failures_before_offline", 3)
+
+# Maximum concurrent BLE connections. Increase only if you know your Bluetooth adapter
+# can handle multiple connections simultaneously without dropping them.
+MAX_CONCURRENT_BLE_CONNECTIONS = settings.get("max_concurrent_ble_connections", 1)
+
+# Pause after a successful BLE disconnect, before connecting to the next device.
+# Helps the Bluetooth adapter clean up state.
+BLE_ADAPTER_SETTLE_SECONDS = settings.get("ble_adapter_settle_seconds", 1.0)
+
+# Pause after sending a BLE control command, before querying BMS status.
+# Increase if charge/discharge commands fail intermittently on your BMS firmware.
+BLE_COMMAND_SETTLE_SECONDS = settings.get("ble_command_settle_seconds", 0.5)
+BLE_TIMEOUT_SECONDS = settings.get("ble_timeout_seconds", 10)
 
 # ─── Runtime Validation ────────────────────────────────────────────────────────
 def validate_config() -> None:
@@ -59,19 +77,71 @@ def validate_config() -> None:
         )
         sys.exit(1)
 
-# Maximum concurrent BLE connections. Increase only if you know your Bluetooth adapter
-# can handle multiple connections simultaneously without dropping them.
-MAX_CONCURRENT_BLE_CONNECTIONS = settings.get("max_concurrent_ble_connections", 1)
+    if MAX_FAILURES_BEFORE_OFFLINE < 1:
+        logger.error(
+            "CONFIGURATION ERROR: max_failures_before_offline must be at least 1. "
+            "A value of %d would mark batteries offline immediately. Fix settings.json and restart.",
+            MAX_FAILURES_BEFORE_OFFLINE
+        )
+        sys.exit(1)
 
-# Pause after a successful BLE disconnect, before connecting to the next device.
-# Helps the Bluetooth adapter clean up state.
-BLE_ADAPTER_SETTLE_SECONDS = settings.get("ble_adapter_settle_seconds", 1.0)
+    if BATTERY_OFFSET_SECONDS < 0:
+        logger.error(
+            "CONFIGURATION ERROR: battery_offset_seconds cannot be negative. "
+            "Fix settings.json and restart."
+        )
+        sys.exit(1)
 
-# Pause after sending a BLE control command, before querying BMS status.
-# Increase if charge/discharge commands fail intermittently on your BMS firmware.
-BLE_COMMAND_SETTLE_SECONDS = settings.get("ble_command_settle_seconds", 0.5)
-BLE_TIMEOUT_SECONDS = settings.get("ble_timeout_seconds", 10)
-MAX_FAILURES_BEFORE_OFFLINE = 3
+    if CYCLE_DELAY_SECONDS < 0:
+        logger.error(
+            "CONFIGURATION ERROR: cycle_delay_seconds cannot be negative. "
+            "Fix settings.json and restart."
+        )
+        sys.exit(1)
+
+    if BLE_TIMEOUT_SECONDS <= 0:
+        logger.error(
+            "CONFIGURATION ERROR: ble_timeout_seconds must be greater than 0. "
+            "Fix settings.json and restart."
+        )
+        sys.exit(1)
+
+    if BLE_COMMAND_SETTLE_SECONDS < 0:
+        logger.error(
+            "CONFIGURATION ERROR: ble_command_settle_seconds cannot be negative. "
+            "Fix settings.json and restart."
+        )
+        sys.exit(1)
+
+    if BLE_ADAPTER_SETTLE_SECONDS < 0:
+        logger.error(
+            "CONFIGURATION ERROR: ble_adapter_settle_seconds cannot be negative. "
+            "Fix settings.json and restart."
+        )
+        sys.exit(1)
+
+    if LOG_MAX_BYTES <= 0:
+        logger.error(
+            "CONFIGURATION ERROR: log_max_bytes must be greater than 0. "
+            "Fix settings.json and restart."
+        )
+        sys.exit(1)
+
+    if LOG_BACKUP_COUNT < 0:
+        logger.error(
+            "CONFIGURATION ERROR: log_backup_count cannot be negative. "
+            "Fix settings.json and restart."
+        )
+        sys.exit(1)
+
+    valid_log_levels = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+    if LOG_LEVEL not in valid_log_levels:
+        logger.warning(
+            "CONFIGURATION WARNING: log_level '%s' is not recognized. "
+            "Valid values are: %s. Defaulting to INFO.",
+            LOG_LEVEL,
+            ", ".join(valid_log_levels),
+        )
 
 MQTT_TOPIC_PREFIX = "solar/battery"
 MQTT_DISCOVERY_PREFIX = "homeassistant"
@@ -91,7 +161,3 @@ CMD_CHARGE_OFF = 0x0B
 CMD_DISCHARGE_ON = 0x0C
 CMD_DISCHARGE_OFF = 0x0D
 
-# ─── Logging ───────────────────────────────────────────────────────────────────
-LOG_LEVEL = "INFO"
-LOG_MAX_BYTES  = 5 * 1024 * 1024  # 5 MB
-LOG_BACKUP_COUNT = 3

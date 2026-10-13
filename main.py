@@ -25,7 +25,15 @@ from config import CMD_CHARGE_ON, CMD_CHARGE_OFF, CMD_DISCHARGE_ON, CMD_DISCHARG
 def setup_logging() -> None:
     """Configures logging with file rotation."""
     root = logging.getLogger()
-    root.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
+    valid_levels = {
+        "DEBUG": logging.DEBUG,
+        "INFO": logging.INFO,
+        "WARNING": logging.WARNING,
+        "ERROR": logging.ERROR,
+        "CRITICAL": logging.CRITICAL,
+    }
+    level = valid_levels.get(LOG_LEVEL, logging.INFO)
+    root.setLevel(level)
 
     fmt = logging.Formatter(
         "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -72,7 +80,7 @@ async def process_command(bid: int, switch_id: str, payload: str, cache, mqtt):
             mqtt.publish_battery(bid, None)
         else:
             # Reconnected: trigger an immediate poll so data appears in HA
-            # without waiting up to 60s for the next scheduled poll_cycle.
+            # without waiting for the next scheduled poll_cycle.
             await poll_one_battery(battery, cache, mqtt)
 
         # Update Solar Battery System counters immediately (Batteries Offline,
@@ -219,7 +227,7 @@ async def main() -> None:
             "Batteries without configured MAC address: %s",
             ", ".join(unconfigured),
         )
-        logger.warning("Edit config.py and fill in the 'mac' fields")
+        logger.warning("Edit settings.json and fill in the 'mac' fields")
 
     # Initialize MQTT
     mqtt = MqttClient()
@@ -242,15 +250,18 @@ async def main() -> None:
         )
     mqtt.command_callback = _mqtt_command_handler
 
-    # Handle SIGTERM signal (for systemd stop)
+    # Handle SIGTERM/SIGINT signals (for systemd stop / Ctrl+C)
     stop_event = asyncio.Event()
 
-    def _handle_stop(signum, frame):
-        logger.info("Signal %d received, shutting down cleanly...", signum)
+    def _handle_stop(sig: int) -> None:
+        logger.info("Signal %d received, shutting down cleanly...", sig)
         stop_event.set()
 
-    signal.signal(signal.SIGTERM, _handle_stop)
-    signal.signal(signal.SIGINT, _handle_stop)
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            main_loop.add_signal_handler(sig, _handle_stop, sig)
+        except NotImplementedError:
+            signal.signal(sig, lambda s, f: _handle_stop(s))
 
     # Main loop
     try:
@@ -270,7 +281,7 @@ async def main() -> None:
             if wait > 0:
                 try:
                     await asyncio.wait_for(stop_event.wait(), timeout=wait)
-                except TimeoutError:
+                except (asyncio.TimeoutError, TimeoutError):
                     pass  # normal timeout, continue to next cycle
 
     finally:

@@ -72,7 +72,17 @@ class MqttClient:
 
     def __init__(self) -> None:
         self.command_callback = None
-        self._client = mqtt.Client(client_id=MQTT_CLIENT_ID, protocol=mqtt.MQTTv5)
+        if hasattr(mqtt, "CallbackAPIVersion"):
+            self._client = mqtt.Client(
+                mqtt.CallbackAPIVersion.VERSION2,
+                client_id=MQTT_CLIENT_ID,
+                protocol=mqtt.MQTTv5,
+            )
+        else:
+            self._client = mqtt.Client(
+                client_id=MQTT_CLIENT_ID,
+                protocol=mqtt.MQTTv5,
+            )
         self._client.on_connect    = self._on_connect
         self._client.on_disconnect = self._on_disconnect
 
@@ -91,16 +101,23 @@ class MqttClient:
         )
 
 
-    def _on_connect(self, client, userdata, flags, rc, properties=None) -> None:
-        if rc == 0:
+    def _on_connect(self, client, userdata, flags, reason_code, properties=None) -> None:
+        if reason_code == 0:
             logger.info("MQTT: connected to %s:%d", MQTT_HOST, MQTT_PORT)
             client.publish(f"{MQTT_TOPIC_PREFIX}/monitor/status", "online", qos=1, retain=True)
             client.subscribe(f"{MQTT_TOPIC_PREFIX}/+/set/+")
         else:
-            logger.error("MQTT: connection error, code %d", rc)
+            logger.error("MQTT: connection error, code %s", reason_code)
 
-    def _on_disconnect(self, client, userdata, rc, properties=None) -> None:
-        logger.warning("MQTT: disconnected (code %d)", rc)
+    def _on_disconnect(self, client, userdata, *args, **kwargs) -> None:
+        # Compatible with both paho-mqtt 1.x (rc, properties) and 2.x VERSION2 (disconnect_flags, reason_code, properties)
+        if len(args) >= 3:
+            rc = args[1]  # reason_code in 2.x
+        elif len(args) >= 1:
+            rc = args[0]  # rc in 1.x
+        else:
+            rc = kwargs.get("reason_code", kwargs.get("rc", "unknown"))
+        logger.warning("MQTT: disconnected (code %s)", rc)
 
     def connect(self) -> None:
         """Connect to broker and start background loop."""
@@ -109,9 +126,13 @@ class MqttClient:
 
     def disconnect(self) -> None:
         """Clean disconnect."""
-        self._client.publish(
+        info = self._client.publish(
             f"{MQTT_TOPIC_PREFIX}/monitor/status", "offline", qos=1, retain=True
         )
+        try:
+            info.wait_for_publish(timeout=2.0)
+        except (ValueError, RuntimeError):
+            pass
         self._client.loop_stop()
         self._client.disconnect()
 
